@@ -105,7 +105,12 @@ class TransactionNormalizer:
         except ValueError:
             return 0.0
 
-    def normalize_dataframe(self, df: pd.DataFrame, source_name: str = "") -> pd.DataFrame:
+    def normalize_dataframe(
+        self,
+        df: pd.DataFrame,
+        source_name: str = "",
+        invert_signs: Optional[bool] = None
+    ) -> pd.DataFrame:
         cols = list(df.columns)
         date_col = self.resolve_column(cols, "date")
         desc_col = self.resolve_column(cols, "description")
@@ -146,13 +151,23 @@ class TransactionNormalizer:
         if norm_df.empty:
             return norm_df
 
-        # Expense sign normalization:
+        # Expense sign handling:
         # Standard convention across our ledger: Expenses are NEGATIVE, Credits/Refunds are POSITIVE.
-        # If >80% of rows are positive in a bank export, invert them to negative expenses.
-        positive_count = (norm_df["amount"] > 0).sum()
-        total_count = len(norm_df)
-        if total_count > 0 and (positive_count / total_count) > 0.65:
+        if invert_signs is True:
             norm_df["amount"] = -norm_df["amount"]
+        elif invert_signs is False:
+            pass  # Leave amounts exactly as provided
+        else:
+            # Auto-detection:
+            # 1. Check if SoFi or similar inverted export in source name
+            is_sofi = "sofi" in source_name.lower()
+            # 2. Check if the majority (>60%) of amounts are positive
+            positive_count = (norm_df["amount"] > 0).sum()
+            total_count = len(norm_df)
+            majority_positive = total_count > 0 and (positive_count / total_count) > 0.60
+            
+            if is_sofi or majority_positive:
+                norm_df["amount"] = -norm_df["amount"]
 
         return norm_df
 

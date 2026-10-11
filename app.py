@@ -19,6 +19,22 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
+# Custom CSS to ensure Deploy button and toolbar are completely hidden
+st.markdown("""
+<style>
+.stDeployButton {
+    display: none !important;
+}
+[data-testid="stToolbar"] {
+    display: none !important;
+}
+footer {
+    display: none !important;
+}
+</style>
+""", unsafe_allow_html=True)
+
+
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(BASE_DIR, "config", "rules.yaml")
 DB_PATH = os.path.join(BASE_DIR, "data", "spending.duckdb")
@@ -217,11 +233,28 @@ with tab_ingest:
     )
 
     if uploaded_files:
+        st.markdown("##### ⚙️ File Settings & Sign Normalization")
+        file_invert_settings = {}
+        for uf in uploaded_files:
+            c1, c2 = st.columns([3, 2])
+            with c1:
+                st.write(f"📄 `{uf.name}`")
+            with c2:
+                # Pre-check if 'sofi' is in the filename
+                is_sofi = "sofi" in uf.name.lower()
+                file_invert_settings[uf.name] = st.checkbox(
+                    "Invert signs (SoFi / Positive CC)",
+                    value=is_sofi,
+                    key=f"invert_{uf.name}",
+                    help="Enable this if this export lists expenses as positive numbers."
+                )
+
         parsed_batches = []
         for uf in uploaded_files:
             try:
                 raw_df = pd.read_csv(uf)
-                norm = normalizer.normalize_dataframe(raw_df, source_name=uf.name)
+                should_invert = file_invert_settings.get(uf.name, None)
+                norm = normalizer.normalize_dataframe(raw_df, source_name=uf.name, invert_signs=should_invert)
                 parsed_batches.append(norm)
             except Exception as e:
                 st.error(f"Error parsing {uf.name}: {e}")

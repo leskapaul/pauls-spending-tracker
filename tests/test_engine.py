@@ -133,6 +133,25 @@ class TestNormalizer:
         assert norm.iloc[1]["amount"] == -12.00
         assert norm.iloc[1]["category"] == "Discretionary"
 
+    def test_explicit_and_sofi_sign_inversion(self, rule_config):
+        normalizer = TransactionNormalizer(rule_config)
+        raw_df = pd.DataFrame({
+            "Date": ["2024-04-01"],
+            "Description": ["Target"],
+            "Amount": ["100.00"]
+        })
+        # 1. SoFi auto-inversion by filename
+        sofi_norm = normalizer.normalize_dataframe(raw_df, source_name="sofi_export_april.csv")
+        assert sofi_norm.iloc[0]["amount"] == -100.00
+
+        # 2. Explicit invert_signs=False keeps original positive
+        no_invert = normalizer.normalize_dataframe(raw_df, source_name="custom.csv", invert_signs=False)
+        assert no_invert.iloc[0]["amount"] == 100.00
+
+        # 3. Explicit invert_signs=True inverts
+        forced_invert = normalizer.normalize_dataframe(raw_df, source_name="custom.csv", invert_signs=True)
+        assert forced_invert.iloc[0]["amount"] == -100.00
+
 
 class TestDeduplicationEngine:
     def test_exact_duplicate_detection(self):
