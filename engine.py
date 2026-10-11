@@ -23,12 +23,26 @@ class RuleConfig:
         self.default_category: str = self.raw_config.get("default_category", "Discretionary")
         self.categories: Dict[str, List[str]] = self.raw_config.get("categories", {})
         self.budget_plans: Dict[str, Dict[str, float]] = self.raw_config.get("budget_plans", {})
+        self.exclude_patterns: List[str] = self.raw_config.get("exclude_patterns", [])
 
         # Precompile regexes
         self.compiled_regexes: List[Tuple[str, re.Pattern]] = []
         for cat_name, patterns in self.categories.items():
             for p in patterns:
                 self.compiled_regexes.append((cat_name, re.compile(p, re.IGNORECASE)))
+
+        self.compiled_exclude_regexes: List[re.Pattern] = [
+            re.compile(p, re.IGNORECASE) for p in self.exclude_patterns
+        ]
+
+    def is_excluded(self, description: str) -> bool:
+        if not description:
+            return False
+        clean_desc = str(description).strip()
+        for pattern in self.compiled_exclude_regexes:
+            if pattern.search(clean_desc):
+                return True
+        return False
 
     def categorize(self, description: str) -> str:
         if not description:
@@ -132,10 +146,17 @@ class TransactionNormalizer:
                 continue
 
             existing_cat = str(row[cat_col]).strip() if cat_col and pd.notna(row[cat_col]) else ""
-            category = self.config.categorize(desc) if not existing_cat else existing_cat
+            is_excl = self.config.is_excluded(desc)
+            if existing_cat:
+                category = existing_cat
+            elif is_excl:
+                category = "Excluded"
+            else:
+                category = self.config.categorize(desc)
 
             dt = datetime.datetime.strptime(d, "%Y-%m-%d")
             records.append({
+                "include": not is_excl,
                 "date": d,
                 "year_month": dt.strftime("%Y-%m"),
                 "year": dt.year,
@@ -144,7 +165,7 @@ class TransactionNormalizer:
                 "amount": round(amt, 2),
                 "category": category,
                 "sheet_source": source_name,
-                "notes": ""
+                "notes": "Auto-excluded by rule" if is_excl else ""
             })
 
         norm_df = pd.DataFrame(records)
@@ -313,6 +334,20 @@ class LedgerRepository:
         if backup_csv_path:
             full_df = self.get_all_transactions()
             full_df.to_csv(backup_csv_path, index=False)
+
+    def update_all_transactions(self, df: pd.DataFrame, backup_csv_path: Optional[str] = None):
+        """Overwrites transactions table with edited DataFrame (for manual inline edits in UI)."""
+        con = self._get_connection()
+        save_df = df.copy()
+        # Drop temporary UI columns
+        drop_cols = [c for c in ["date_dt", "include"] if c in save_df.columns]
+        if drop_cols:
+            save_df = save_df.drop(columns=drop_cols)
+        con.register("updated_ledger_view", save_df)
+        con.execute("CREATE OR REPLACE TABLE transactions AS SELECT * FROM updated_ledger_view")
+        con.close()
+        if backup_csv_path:
+            save_df.to_csv(backup_csv_path, index=False)
 
     def get_fire_summary(self, budget_plans: Dict[str, Dict[str, float]]) -> Dict[str, Any]:
         """Calculates monthly and annual deficit vs plan matching your FIRE spreadsheet."""

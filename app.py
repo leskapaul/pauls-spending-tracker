@@ -146,8 +146,12 @@ with tab_overview:
 # TAB 2: Single-Stream Ledger
 # -------------------------------------------------------------
 with tab_ledger:
-    st.header("Searchable Unified Ledger")
-    st.markdown("All 5,472+ historical transactions in a single continuous stream.")
+    col_h1, col_h2 = st.columns([4, 1])
+    with col_h1:
+        st.header("Searchable Unified Ledger")
+        st.markdown("All 5,472+ historical transactions in a single continuous stream.")
+    with col_h2:
+        edit_mode = st.toggle("✏️ Edit Ledger Mode", value=False, help="Enable inline editing of categories, notes, or deleting rows.")
 
     f_col1, f_col2, f_col3, f_col4 = st.columns([2, 2, 2, 2])
     with f_col1:
@@ -198,22 +202,60 @@ with tab_ledger:
     m2.metric("Total Spent", f"${abs(filtered_df['amount'].sum()):,.2f}")
     m3.metric("Average Transaction", f"${abs(filtered_df['amount'].mean()):,.2f}" if len(filtered_df) > 0 else "$0.00")
 
-    # Table Display
-    display_cols = ["date", "description", "amount", "category", "notes", "sheet_source"]
-    st.dataframe(
-        filtered_df[display_cols].style.format({"amount": "${:,.2f}"}),
-        use_container_width=True,
-        height=500
-    )
+    all_cat_options = sorted(list(config.categories.keys()) + ["Discretionary", "Excluded", "Shared / Reimbursements"])
 
-    # Export Button
-    csv_bytes = filtered_df[display_cols].to_csv(index=False).encode('utf-8')
-    st.download_button(
-        "📥 Download Filtered Slice as CSV",
-        data=csv_bytes,
-        file_name="filtered_expenses.csv",
-        mime="text/csv"
-    )
+    if not edit_mode:
+        # Table Display
+        display_cols = ["date", "description", "amount", "category", "notes", "sheet_source"]
+        st.dataframe(
+            filtered_df[display_cols].style.format({"amount": "${:,.2f}"}),
+            use_container_width=True,
+            height=500
+        )
+
+        # Export Button
+        csv_bytes = filtered_df[display_cols].to_csv(index=False).encode('utf-8')
+        st.download_button(
+            "📥 Download Filtered Slice as CSV",
+            data=csv_bytes,
+            file_name="filtered_expenses.csv",
+            mime="text/csv"
+        )
+    else:
+        st.info("💡 **Edit Mode Active**: You can change any category, adjust amounts or notes, and delete rows directly. Click **Save Changes** below to commit.")
+        editable_cols = ["date", "description", "amount", "category", "notes", "sheet_source"]
+        
+        edited_ledger = st.data_editor(
+            filtered_df[editable_cols],
+            column_config={
+                "category": st.column_config.SelectboxColumn("Category", options=all_cat_options, required=True),
+                "amount": st.column_config.NumberColumn("Amount", format="$%.2f"),
+                "notes": st.column_config.TextColumn("Notes"),
+                "date": st.column_config.TextColumn("Date", disabled=True),
+                "description": st.column_config.TextColumn("Description", disabled=True),
+                "sheet_source": st.column_config.TextColumn("Source", disabled=True),
+            },
+            use_container_width=True,
+            num_rows="dynamic",
+            height=500,
+            key="ledger_editor"
+        )
+
+        if st.button("💾 Save Changes to Ledger", type="primary"):
+            updated_full = all_df.copy()
+            for idx, row in edited_ledger.iterrows():
+                if idx in updated_full.index:
+                    updated_full.loc[idx, "category"] = row["category"]
+                    updated_full.loc[idx, "notes"] = row["notes"]
+                    updated_full.loc[idx, "amount"] = row["amount"]
+            deleted_indices = set(filtered_df.index) - set(edited_ledger.index)
+            if deleted_indices:
+                updated_full = updated_full.drop(index=list(deleted_indices))
+            
+            repo.update_all_transactions(updated_full, backup_csv_path=BACKUP_CSV_PATH)
+            st.success("Successfully updated ledger in DuckDB and CSV backup!")
+            st.cache_resource.clear()
+            st.rerun()
 
 # -------------------------------------------------------------
 # TAB 3: Ingest & Bookend Deduplicate Studio
@@ -240,7 +282,6 @@ with tab_ingest:
             with c1:
                 st.write(f"📄 `{uf.name}`")
             with c2:
-                # Pre-check if 'sofi' is in the filename
                 is_sofi = "sofi" in uf.name.lower()
                 file_invert_settings[uf.name] = st.checkbox(
                     "Invert signs (SoFi / Positive CC)",
@@ -295,14 +336,47 @@ with tab_ingest:
                 with st.expander(f"View {len(exact_dups)} Exact Duplicates (Will Be Skipped)"):
                     st.dataframe(exact_dups[["date", "description", "amount", "category"]], use_container_width=True)
 
-            # Display New Transactions
+            # Display New Transactions with Staging Data Editor
             if not new_txs.empty:
-                st.subheader(f"Preview: {len(new_txs)} New Transactions Ready to Commit")
-                st.dataframe(new_txs[["date", "description", "amount", "category"]], use_container_width=True)
+                st.subheader(f"Interactive Review: {len(new_txs)} Transactions Ready to Stage")
+                st.markdown("""
+                * **`Include?`**: Uncheck any row you want to skip or exclude (e.g. mortgages, tenant rent, transfers).
+                * **`Category`**: Click the category dropdown on any row to reassign it (e.g. flip to *Home Upgrades* or *Repairs*).
+                * **`Notes`**: Add details for reimbursements or tax tracking.
+                """)
 
-                if st.button("🚀 Commit New Transactions to Ledger", type="primary"):
-                    repo.append_transactions(new_txs, backup_csv_path=BACKUP_CSV_PATH)
-                    st.success(f"Successfully added {len(new_txs)} transactions to spending.duckdb and updated CSV backup!")
+                all_cat_options = sorted(list(config.categories.keys()) + ["Discretionary", "Excluded", "Shared / Reimbursements"])
+                if "include" not in new_txs.columns:
+                    new_txs["include"] = True
+
+                staging_cols = ["include", "date", "description", "amount", "category", "notes", "sheet_source"]
+                
+                edited_staging = st.data_editor(
+                    new_txs[staging_cols],
+                    column_config={
+                        "include": st.column_config.CheckboxColumn("Include?", default=True, help="Uncheck to exclude"),
+                        "category": st.column_config.SelectboxColumn("Category", options=all_cat_options, required=True),
+                        "amount": st.column_config.NumberColumn("Amount", format="$%.2f", disabled=True),
+                        "date": st.column_config.TextColumn("Date", disabled=True),
+                        "description": st.column_config.TextColumn("Description", disabled=True),
+                        "notes": st.column_config.TextColumn("Notes"),
+                        "sheet_source": st.column_config.TextColumn("Source", disabled=True)
+                    },
+                    use_container_width=True,
+                    num_rows="dynamic",
+                    key="staging_editor"
+                )
+
+                to_commit = edited_staging[edited_staging["include"] == True].copy()
+                to_commit = to_commit[to_commit["category"] != "Excluded"]
+                excluded_count = len(edited_staging) - len(to_commit)
+
+                st.markdown(f"**Ready to commit**: **{len(to_commit)}** approved transactions (*{excluded_count} excluded/skipped*).")
+
+                if st.button("🚀 Commit Approved Transactions to Ledger", type="primary"):
+                    save_batch = to_commit.drop(columns=["include"])
+                    repo.append_transactions(save_batch, backup_csv_path=BACKUP_CSV_PATH)
+                    st.success(f"Successfully committed {len(save_batch)} transactions to spending.duckdb and CSV backup!")
                     st.cache_resource.clear()
                     st.rerun()
             else:

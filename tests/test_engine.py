@@ -50,6 +50,11 @@ categories:
     - "airbnb.*"
     - "disney.*"
 
+exclude_patterns:
+  - ".*mortgage.*"
+  - ".*tenant rent.*"
+  - ".*autopay.*"
+
 budget_plans:
   monthly:
     Groceries: 750.00
@@ -87,6 +92,13 @@ class TestCategorization:
         assert rule_config.categorize("Random Unknown Coffee Shop") == "Discretionary"
         assert rule_config.categorize("") == "Discretionary"
         assert rule_config.categorize(None) == "Discretionary"
+
+    def test_exclusion_patterns(self, rule_config):
+        assert rule_config.is_excluded("WELLS FARGO MORTGAGE PAYMENT") is True
+        assert rule_config.is_excluded("Deposit: Tenant Rent Unit 2") is True
+        assert rule_config.is_excluded("CHASE CREDIT CARD AUTOPAY") is True
+        assert rule_config.is_excluded("Shoprite Groceries") is False
+        assert rule_config.is_excluded("") is False
 
 
 class TestNormalizer:
@@ -151,6 +163,23 @@ class TestNormalizer:
         # 3. Explicit invert_signs=True inverts
         forced_invert = normalizer.normalize_dataframe(raw_df, source_name="custom.csv", invert_signs=True)
         assert forced_invert.iloc[0]["amount"] == -100.00
+
+    def test_exclusion_normalization(self, rule_config):
+        normalizer = TransactionNormalizer(rule_config)
+        raw_df = pd.DataFrame({
+            "Date": ["2024-04-01", "2024-04-02"],
+            "Description": ["Wells Fargo Mortgage Payment", "Shoprite"],
+            "Amount": ["-2500.00", "-50.00"]
+        })
+        norm = normalizer.normalize_dataframe(raw_df, source_name="test.csv")
+        assert len(norm) == 2
+        # First row is mortgage => auto-excluded
+        assert bool(norm.iloc[0]["include"]) is False
+        assert norm.iloc[0]["category"] == "Excluded"
+        assert "Auto-excluded" in norm.iloc[0]["notes"]
+        # Second row is normal groceries => included
+        assert bool(norm.iloc[1]["include"]) is True
+        assert norm.iloc[1]["category"] == "Groceries"
 
 
 class TestDeduplicationEngine:
@@ -248,3 +277,10 @@ class TestLedgerRepository:
             # Groceries spent -500 with plan 750 => deficit = -1 * (-500 + 750) = -250 (i.e. +250 under budget)
             assert monthly_rep.iloc[0]["Groceries_spend"] == -500.00
             assert monthly_rep.iloc[0]["Discretionary_spend"] == -3000.00
+
+            # Test update_all_transactions
+            modified = loaded.copy()
+            modified.loc[modified["description"] == "Shoprite", "category"] = "Home Upgrades"
+            repo.update_all_transactions(modified)
+            reloaded = repo.get_all_transactions()
+            assert reloaded.loc[reloaded["description"] == "Shoprite", "category"].iloc[0] == "Home Upgrades"

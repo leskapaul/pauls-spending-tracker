@@ -76,6 +76,8 @@ categories:
     - ".*hvac.*"
     - ".*electric upgrade.*"
     - ".*appliance.*"
+    - ".*furnace.*"
+    - ".*repair.*"
 
   Home Upgrades:
     - "the home depot.*"
@@ -83,6 +85,11 @@ categories:
     - "lowes.*"
     - "ikea.*"
     - "foyer windows.*"
+    - ".*shed.*"
+    - ".*fireplace.*"
+    - ".*mudroom.*"
+    - ".*basement.*"
+    - ".*landscaping.*"
 
   Property Maintenance:
     - "9049.*"
@@ -100,6 +107,17 @@ categories:
     - ".*reimburse jing.*"
     - ".*paid jing.*"
 
+# Automated Exclusion Patterns (Mortgages, Tenant Rent, Internal Transfers, CC Payoffs)
+exclude_patterns:
+  - ".*mortgage.*"
+  - ".*tenant rent.*"
+  - ".*rent payment.*"
+  - ".*payment thank you.*"
+  - ".*online payment.*"
+  - ".*autopay.*"
+  - ".*credit card payment.*"
+  - ".*zelle transfer.*"
+
 budget_plans:
   monthly:
     Groceries: 750.00
@@ -109,3 +127,4 @@ budget_plans:
   annual:
     Vacations: 12000.00
     Repairs: 3000.00
+
