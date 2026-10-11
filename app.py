@@ -1,0 +1,276 @@
+"""
+Personal Finance & FIRE Spending Dashboard
+Interactive Streamlit application for single-stream expense analysis,
+FIRE plan vs. actual deficit tracking, and bank CSV ingestion with bookend deduplication.
+"""
+
+import os
+import datetime
+import streamlit as st
+import pandas as pd
+import duckdb
+from engine import RuleConfig, TransactionNormalizer, DeduplicationEngine, LedgerRepository
+
+# Page Configuration
+st.set_page_config(
+    page_title="FIRE Spending & Single-Stream Ledger",
+    page_icon="💰",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+CONFIG_PATH = os.path.join(BASE_DIR, "config", "rules.yaml")
+DB_PATH = os.path.join(BASE_DIR, "data", "spending.duckdb")
+BACKUP_CSV_PATH = os.path.join(BASE_DIR, "data", "spending_ledger.csv")
+
+@st.cache_resource
+def get_engine_components():
+    config = RuleConfig(CONFIG_PATH)
+    normalizer = TransactionNormalizer(config)
+    dedup = DeduplicationEngine(bookend_day_window=3)
+    repo = LedgerRepository(DB_PATH)
+    return config, normalizer, dedup, repo
+
+config, normalizer, dedup, repo = get_engine_components()
+
+# Sidebar
+st.sidebar.title("💰 FIRE Finance")
+st.sidebar.markdown("*Single-stream transaction ledger & FIRE analytics*")
+
+# Load Ledger Data
+all_df = repo.get_all_transactions()
+
+if all_df.empty:
+    st.warning("No transactions found in database. Please run migration or ingest CSVs.")
+    st.stop()
+
+# Ensure date column is datetime
+all_df["date_dt"] = pd.to_datetime(all_df["date"], errors="coerce")
+min_date = all_df["date_dt"].min().date()
+max_date = all_df["date_dt"].max().date()
+
+st.sidebar.markdown("---")
+st.sidebar.metric("Total Transactions", f"{len(all_df):,}")
+total_spend = all_df["amount"].sum()
+st.sidebar.metric("All-Time Spend", f"${abs(total_spend):,.2f}")
+st.sidebar.caption(f"Historical span: {min_date} to {max_date}")
+
+# Main Tabs
+tab_overview, tab_ledger, tab_ingest = st.tabs([
+    "📊 FIRE Analytics & Plan Deficits",
+    "📜 Single-Stream Ledger",
+    "📥 Ingest & Deduplicate CSVs"
+])
+
+# -------------------------------------------------------------
+# TAB 1: FIRE Analytics & Plan Deficit Tracking
+# -------------------------------------------------------------
+with tab_overview:
+    st.header("FIRE Expense Rollup & Deficit vs. Plan")
+    st.markdown("""
+    Automatically computes your monthly and yearly averages and compares them against your 
+    target **Plan**—eliminating the need to manually link formulas across 55+ spreadsheet tabs.
+    """)
+
+    # Deficit vs Plan Calculation
+    fire_summary = repo.get_fire_summary(config.budget_plans)
+    monthly_rep = fire_summary["monthly_report"]
+
+    # Top KPI Cards
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        latest_month = monthly_rep.iloc[-1]["year_month"]
+        latest_spend = abs(monthly_rep.iloc[-1]["total_spend"])
+        st.metric(f"Latest Month ({latest_month})", f"${latest_spend:,.2f}")
+    with col2:
+        latest_deficit = monthly_rep.iloc[-1]["monthly_deficit_vs_plan"]
+        st.metric(
+            "Latest Deficit vs Plan",
+            f"${latest_deficit:,.2f}",
+            delta=f"{'-' if latest_deficit < 0 else '+'}${abs(latest_deficit):,.2f}",
+            delta_color="normal"
+        )
+    with col3:
+        avg_monthly = abs(all_df.groupby("year_month")["amount"].sum().mean())
+        st.metric("Avg Monthly Burn", f"${avg_monthly:,.2f}")
+    with col4:
+        total_months = all_df["year_month"].nunique()
+        st.metric("Months Tracked", f"{total_months}")
+
+    st.markdown("---")
+
+    # Chart 1: Monthly Spend Trend
+    st.subheader("Monthly Spending by Category Over Time")
+    cat_monthly = all_df.groupby(["year_month", "category"])["amount"].sum().abs().reset_index()
+    pivot_monthly = cat_monthly.pivot(index="year_month", columns="category", values="amount").fillna(0)
+    st.bar_chart(pivot_monthly)
+
+    # Chart 2: Deficit vs Plan Over Time
+    st.subheader("Monthly Deficit / Surplus vs. Plan ($)")
+    deficit_chart_df = monthly_rep.set_index("year_month")[["monthly_deficit_vs_plan"]]
+    st.line_chart(deficit_chart_df)
+
+    # Annual Rollup Table (Matching your Excel yearly tabs)
+    st.subheader("Annual Category Averages vs. Planned Budgets")
+    
+    annual_summary = all_df.groupby(["year", "category"])["amount"].sum().abs().reset_index()
+    # Count unique months per year
+    months_per_year = all_df.groupby("year")["month"].nunique().to_dict()
+    annual_summary["months_in_year"] = annual_summary["year"].map(months_per_year)
+    annual_summary["monthly_avg"] = round(annual_summary["amount"] / annual_summary["months_in_year"], 2)
+
+    pivot_annual = annual_summary.pivot(index="category", columns="year", values="monthly_avg").fillna(0)
+    # Add Planned column
+    monthly_plan_dict = config.budget_plans.get("monthly", {})
+    pivot_annual["Planned / Mo"] = pivot_annual.index.map(lambda c: monthly_plan_dict.get(c, "-"))
+    st.dataframe(pivot_annual.style.format(precision=2), use_container_width=True)
+
+# -------------------------------------------------------------
+# TAB 2: Single-Stream Ledger
+# -------------------------------------------------------------
+with tab_ledger:
+    st.header("Searchable Unified Ledger")
+    st.markdown("All 5,472+ historical transactions in a single continuous stream.")
+
+    f_col1, f_col2, f_col3, f_col4 = st.columns([2, 2, 2, 2])
+    with f_col1:
+        date_range = st.date_input(
+            "Date Range",
+            value=(min_date, max_date),
+            min_value=min_date,
+            max_value=max_date
+        )
+    with f_col2:
+        all_categories = sorted(all_df["category"].unique())
+        selected_cats = st.multiselect("Filter Categories", all_categories, default=[])
+    with f_col3:
+        search_query = st.text_input("Search Description / Merchant", "")
+    with f_col4:
+        sort_order = st.selectbox("Sort By", ["Date (Newest First)", "Date (Oldest First)", "Amount (Highest First)", "Amount (Lowest First)"])
+
+    # Apply filters
+    filtered_df = all_df.copy()
+    if len(date_range) == 2:
+        start_d, end_d = date_range
+        filtered_df = filtered_df[
+            (filtered_df["date_dt"].dt.date >= start_d) & 
+            (filtered_df["date_dt"].dt.date <= end_d)
+        ]
+    if selected_cats:
+        filtered_df = filtered_df[filtered_df["category"].isin(selected_cats)]
+    if search_query:
+        q = search_query.strip().lower()
+        filtered_df = filtered_df[
+            filtered_df["description"].str.lower().str.contains(q, na=False) |
+            filtered_df["notes"].str.lower().str.contains(q, na=False)
+        ]
+
+    # Sorting
+    if sort_order == "Date (Newest First)":
+        filtered_df = filtered_df.sort_values(by="date", ascending=False)
+    elif sort_order == "Date (Oldest First)":
+        filtered_df = filtered_df.sort_values(by="date", ascending=True)
+    elif sort_order == "Amount (Highest First)":
+        filtered_df = filtered_df.sort_values(by="amount", ascending=False)
+    elif sort_order == "Amount (Lowest First)":
+        filtered_df = filtered_df.sort_values(by="amount", ascending=True)
+
+    # Filtered Metrics
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Matching Transactions", f"{len(filtered_df):,}")
+    m2.metric("Total Spent", f"${abs(filtered_df['amount'].sum()):,.2f}")
+    m3.metric("Average Transaction", f"${abs(filtered_df['amount'].mean()):,.2f}" if len(filtered_df) > 0 else "$0.00")
+
+    # Table Display
+    display_cols = ["date", "description", "amount", "category", "notes", "sheet_source"]
+    st.dataframe(
+        filtered_df[display_cols].style.format({"amount": "${:,.2f}"}),
+        use_container_width=True,
+        height=500
+    )
+
+    # Export Button
+    csv_bytes = filtered_df[display_cols].to_csv(index=False).encode('utf-8')
+    st.download_button(
+        "📥 Download Filtered Slice as CSV",
+        data=csv_bytes,
+        file_name="filtered_expenses.csv",
+        mime="text/csv"
+    )
+
+# -------------------------------------------------------------
+# TAB 3: Ingest & Bookend Deduplicate Studio
+# -------------------------------------------------------------
+with tab_ingest:
+    st.header("Monthly Bank CSV Ingestion & Deduplication")
+    st.markdown("""
+    Upload raw monthly transaction exports across any of your bank accounts.
+    The engine will normalize column names, classify categories via regex, and 
+    **flag monthly bookend duplicates** so you never double-count overlapping dates.
+    """)
+
+    uploaded_files = st.file_uploader(
+        "Upload one or more Bank CSV exports",
+        type=["csv"],
+        accept_multiple_files=True
+    )
+
+    if uploaded_files:
+        parsed_batches = []
+        for uf in uploaded_files:
+            try:
+                raw_df = pd.read_csv(uf)
+                norm = normalizer.normalize_dataframe(raw_df, source_name=uf.name)
+                parsed_batches.append(norm)
+            except Exception as e:
+                st.error(f"Error parsing {uf.name}: {e}")
+
+        if parsed_batches:
+            combined_incoming = pd.concat(parsed_batches, ignore_index=True)
+            st.success(f"Loaded {len(combined_incoming)} transactions across {len(uploaded_files)} file(s).")
+
+            # Run Deduplication Engine
+            new_txs, exact_dups, suspects = dedup.deduplicate(combined_incoming, all_df)
+
+            col_a, col_b, col_c = st.columns(3)
+            col_a.metric("New Transactions", len(new_txs))
+            col_b.metric("Exact Duplicates (Skipped)", len(exact_dups))
+            col_c.metric("Bookend Suspects Flagged", len(suspects))
+
+            # Display Bookend Suspects if any
+            if suspects:
+                st.warning(f"⚠️ {len(suspects)} Bookend Duplicate Candidates Detected!")
+                st.markdown("These transactions match existing records within $\pm 3$ days with identical amounts and merchants:")
+                
+                suspect_rows = []
+                for s in suspects:
+                    inc = s["incoming"]
+                    ex = s["matched_existing"]
+                    suspect_rows.append({
+                        "Incoming Date": inc["date"],
+                        "Incoming Desc": inc["description"],
+                        "Amount": f"${inc['amount']:.2f}",
+                        "Existing Match Date": ex["date_str"],
+                        "Existing Match Desc": ex["description"],
+                        "Flag Reason": s["reason"]
+                    })
+                st.dataframe(pd.DataFrame(suspect_rows), use_container_width=True)
+
+            # Display Exact Duplicates
+            if not exact_dups.empty:
+                with st.expander(f"View {len(exact_dups)} Exact Duplicates (Will Be Skipped)"):
+                    st.dataframe(exact_dups[["date", "description", "amount", "category"]], use_container_width=True)
+
+            # Display New Transactions
+            if not new_txs.empty:
+                st.subheader(f"Preview: {len(new_txs)} New Transactions Ready to Commit")
+                st.dataframe(new_txs[["date", "description", "amount", "category"]], use_container_width=True)
+
+                if st.button("🚀 Commit New Transactions to Ledger", type="primary"):
+                    repo.append_transactions(new_txs, backup_csv_path=BACKUP_CSV_PATH)
+                    st.success(f"Successfully added {len(new_txs)} transactions to spending.duckdb and updated CSV backup!")
+                    st.cache_resource.clear()
+                    st.rerun()
+            else:
+                st.info("No new transactions found to commit (all were duplicates).")

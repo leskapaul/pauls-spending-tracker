@@ -1,0 +1,111 @@
+# Personal Finance Configuration: Column Aliases, Categorization Regexes, and Budget Plans
+
+column_aliases:
+  date:
+    - "Date"
+    - "Posted Date"
+    - "Transaction Date"
+    - "date"
+    - "posted date"
+    - "Trans Date"
+  description:
+    - "Description"
+    - "Payee"
+    - "transaction"
+    - "Transaction Name"
+    - "Merchant"
+    - "desc"
+    - "Desc"
+  amount:
+    - "Amount"
+    - "amount"
+    - "Transaction Amount"
+  category:
+    - "Category"
+    - "category"
+    - "Notes"
+    - "notes"
+
+default_category: "Discretionary"
+
+categories:
+  Groceries:
+    - "shoprite.*"
+    - "rock farmers market.*"
+    - "99 ranch market.*"
+    - "wholefds.*"
+    - "whole foods.*"
+    - "trader joe.*"
+    - "kilroy.*"
+    - "wegmans.*"
+    - "h mart.*"
+    - "hmart.*"
+    - "aldi.*"
+    - "costco whse.*"
+
+  Utilities:
+    - ".*ridgewood water.*"
+    - "public service.*pseg.*"
+    - "pseg.*"
+    - "computil.*"
+    - "con edison.*"
+
+  Data:
+    - "verizon.*"
+    - "google fi.*"
+    - "spotify.*"
+    - "netflix.*"
+    - "optimum.*"
+
+  Vacations:
+    - ".*disney.*"
+    - "airbnb.*"
+    - "delta.*"
+    - "united air.*"
+    - "american air.*"
+    - "jetblue.*"
+    - "marriott.*"
+    - "hilton.*"
+    - "hyatt.*"
+    - "booking\\.com.*"
+    - "expedia.*"
+
+  Repairs:
+    - ".*water softener.*"
+    - ".*plumb.*"
+    - ".*hvac.*"
+    - ".*electric upgrade.*"
+    - ".*appliance.*"
+
+  Home Upgrades:
+    - "the home depot.*"
+    - "home depot.*"
+    - "lowes.*"
+    - "ikea.*"
+    - "foyer windows.*"
+
+  Property Maintenance:
+    - "9049.*"
+    - "rental propert.*"
+    - "investment property.*"
+
+  Healthcare:
+    - "cvs/pharmacy.*"
+    - "walgreens.*"
+    - "quest diagnostics.*"
+    - "dental.*"
+
+  Shared / Reimbursements:
+    - ".*due jing.*"
+    - ".*reimburse jing.*"
+    - ".*paid jing.*"
+
+budget_plans:
+  monthly:
+    Groceries: 750.00
+    Discretionary: 4000.00
+    Data: 200.00
+    Utilities: 250.00
+  annual:
+    Vacations: 12000.00
+    Repairs: 3000.00

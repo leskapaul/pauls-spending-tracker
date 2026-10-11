@@ -1,0 +1,341 @@
+"""
+Core Personal Finance Engine
+Handles column normalization, regex categorization, bookend deduplication,
+and DuckDB ledger operations.
+"""
+
+import os
+import re
+import datetime
+from typing import Dict, List, Tuple, Optional, Any
+import yaml
+import duckdb
+import pandas as pd
+
+
+class RuleConfig:
+    def __init__(self, config_path: str):
+        self.config_path = config_path
+        with open(config_path, "r") as f:
+            self.raw_config = yaml.safe_load(f)
+
+        self.column_aliases: Dict[str, List[str]] = self.raw_config.get("column_aliases", {})
+        self.default_category: str = self.raw_config.get("default_category", "Discretionary")
+        self.categories: Dict[str, List[str]] = self.raw_config.get("categories", {})
+        self.budget_plans: Dict[str, Dict[str, float]] = self.raw_config.get("budget_plans", {})
+
+        # Precompile regexes
+        self.compiled_regexes: List[Tuple[str, re.Pattern]] = []
+        for cat_name, patterns in self.categories.items():
+            for p in patterns:
+                self.compiled_regexes.append((cat_name, re.compile(p, re.IGNORECASE)))
+
+    def categorize(self, description: str) -> str:
+        if not description:
+            return self.default_category
+        clean_desc = str(description).strip()
+        for cat_name, pattern in self.compiled_regexes:
+            if pattern.search(clean_desc):
+                return cat_name
+        return self.default_category
+
+
+def clean_merchant_string(desc: str) -> str:
+    """Simplifies merchant description for robust comparison."""
+    if not desc:
+        return ""
+    # Remove dates, phone numbers, state codes, reference IDs
+    s = str(desc).lower()
+    s = re.sub(r'\b\d{4}-\d{2}-\d{2}\b', '', s)
+    s = re.sub(r'[\d\-#*]+', ' ', s)
+    s = re.sub(r'\b(in|des|id|indn|co|ppd|web)\b', ' ', s)
+    s = re.sub(r'\s+', ' ', s)
+    return s.strip()
+
+
+class TransactionNormalizer:
+    def __init__(self, rule_config: RuleConfig):
+        self.config = rule_config
+
+    def resolve_column(self, actual_columns: List[str], target_field: str) -> Optional[str]:
+        aliases = self.config.column_aliases.get(target_field, [])
+        all_candidates = [target_field] + aliases
+        for col in actual_columns:
+            for candidate in all_candidates:
+                if col.strip().lower() == candidate.lower():
+                    return col
+        return None
+
+    def parse_date(self, val: Any) -> Optional[str]:
+        if val is None or pd.isna(val) or val == "":
+            return None
+        if isinstance(val, (datetime.date, datetime.datetime)):
+            return val.strftime("%Y-%m-%d")
+        if isinstance(val, (int, float)):
+            try:
+                import openpyxl.utils.datetime as o_dt
+                return o_dt.from_excel(val).strftime("%Y-%m-%d")
+            except Exception:
+                base = datetime.date(1899, 12, 30)
+                return (base + datetime.timedelta(days=int(val))).strftime("%Y-%m-%d")
+        val_str = str(val).strip()
+        for fmt in ("%Y-%m-%d", "%m/%d/%Y", "%m/%d/%y", "%Y/%m/%d", "%d/%m/%Y"):
+            try:
+                return datetime.datetime.strptime(val_str, fmt).strftime("%Y-%m-%d")
+            except ValueError:
+                pass
+        # Fallback to dateutil if present
+        try:
+            from dateutil.parser import parse
+            return parse(val_str).strftime("%Y-%m-%d")
+        except Exception:
+            return None
+
+    def parse_amount(self, val: Any) -> float:
+        if val is None or pd.isna(val) or val == "":
+            return 0.0
+        if isinstance(val, (int, float)):
+            return float(val)
+        s = str(val).strip().replace("$", "").replace(",", "")
+        # Handle accounting parenthesis: (12.34) -> -12.34
+        if s.startswith("(") and s.endswith(")"):
+            s = f"-{s[1:-1]}"
+        try:
+            return float(s)
+        except ValueError:
+            return 0.0
+
+    def normalize_dataframe(self, df: pd.DataFrame, source_name: str = "") -> pd.DataFrame:
+        cols = list(df.columns)
+        date_col = self.resolve_column(cols, "date")
+        desc_col = self.resolve_column(cols, "description")
+        amt_col = self.resolve_column(cols, "amount")
+        cat_col = self.resolve_column(cols, "category")
+
+        if not date_col or not desc_col or not amt_col:
+            raise ValueError(
+                f"Missing required columns in CSV. Found: {cols}. "
+                f"Resolved: date={date_col}, description={desc_col}, amount={amt_col}"
+            )
+
+        records = []
+        for _, row in df.iterrows():
+            d = self.parse_date(row[date_col])
+            desc = str(row[desc_col] or "").strip()
+            amt = self.parse_amount(row[amt_col])
+            if not d or not desc or amt == 0.0:
+                continue
+
+            existing_cat = str(row[cat_col]).strip() if cat_col and pd.notna(row[cat_col]) else ""
+            category = self.config.categorize(desc) if not existing_cat else existing_cat
+
+            dt = datetime.datetime.strptime(d, "%Y-%m-%d")
+            records.append({
+                "date": d,
+                "year_month": dt.strftime("%Y-%m"),
+                "year": dt.year,
+                "month": dt.month,
+                "description": desc,
+                "amount": round(amt, 2),
+                "category": category,
+                "sheet_source": source_name,
+                "notes": ""
+            })
+
+        norm_df = pd.DataFrame(records)
+        if norm_df.empty:
+            return norm_df
+
+        # Expense sign normalization:
+        # Standard convention across our ledger: Expenses are NEGATIVE, Credits/Refunds are POSITIVE.
+        # If >80% of rows are positive in a bank export, invert them to negative expenses.
+        positive_count = (norm_df["amount"] > 0).sum()
+        total_count = len(norm_df)
+        if total_count > 0 and (positive_count / total_count) > 0.65:
+            norm_df["amount"] = -norm_df["amount"]
+
+        return norm_df
+
+
+class DeduplicationEngine:
+    def __init__(self, bookend_day_window: int = 3):
+        self.window = bookend_day_window
+
+    def deduplicate(
+        self, incoming_df: pd.DataFrame, existing_df: pd.DataFrame
+    ) -> Tuple[pd.DataFrame, pd.DataFrame, List[Dict[str, Any]]]:
+        """
+        Deduplicates incoming transactions against the existing ledger.
+        Returns:
+          - new_txs: rows that are completely new
+          - exact_dups: rows that are exact matches (same date, same amount, same description)
+          - bookend_suspects: rows that closely match within +/- window days with identical amount
+        """
+        if incoming_df.empty:
+            return incoming_df, pd.DataFrame(), []
+
+        if existing_df.empty:
+            return incoming_df, pd.DataFrame(), []
+
+        new_rows = []
+        exact_dups = []
+        bookend_suspects = []
+
+        # Prepare existing lookup structures
+        # 1. Exact lookup: (date, amount, cleaned_desc)
+        existing_exact_set = set()
+        for _, row in existing_df.iterrows():
+            key = (row["date"], round(float(row["amount"]), 2), clean_merchant_string(row["description"]))
+            existing_exact_set.add(key)
+
+        # 2. Existing records with date objects for window search
+        existing_records = []
+        for _, row in existing_df.iterrows():
+            try:
+                dt = datetime.datetime.strptime(row["date"], "%Y-%m-%d").date()
+                existing_records.append({
+                    "date": dt,
+                    "date_str": row["date"],
+                    "amount": round(float(row["amount"]), 2),
+                    "description": row["description"],
+                    "clean_desc": clean_merchant_string(row["description"]),
+                    "category": row.get("category", "")
+                })
+            except Exception:
+                continue
+
+        for _, inc_row in incoming_df.iterrows():
+            inc_date_str = inc_row["date"]
+            inc_amt = round(float(inc_row["amount"]), 2)
+            inc_desc = inc_row["description"]
+            inc_clean = clean_merchant_string(inc_desc)
+
+            # Check 1: Exact match
+            exact_key = (inc_date_str, inc_amt, inc_clean)
+            if exact_key in existing_exact_set:
+                exact_dups.append(inc_row.to_dict())
+                continue
+
+            # Check 2: Bookend / Window match (+/- window days with matching amount)
+            inc_date = datetime.datetime.strptime(inc_date_str, "%Y-%m-%d").date()
+            is_bookend = False
+            matched_candidate = None
+
+            for ex in existing_records:
+                if abs(ex["amount"] - inc_amt) < 0.01:
+                    day_diff = abs((inc_date - ex["date"]).days)
+                    if 0 < day_diff <= self.window:
+                        # Check description similarity
+                        # If one cleaned string is a substring of the other or word tokens overlap
+                        inc_tokens = set(inc_clean.split())
+                        ex_tokens = set(ex["clean_desc"].split())
+                        if inc_clean == ex["clean_desc"] or (inc_tokens and inc_tokens.issubset(ex_tokens)) or (ex_tokens and ex_tokens.issubset(inc_tokens)):
+                            is_bookend = True
+                            matched_candidate = ex
+                            matched_candidate["day_diff"] = day_diff
+                            break
+
+            if is_bookend and matched_candidate:
+                bookend_suspects.append({
+                    "incoming": inc_row.to_dict(),
+                    "matched_existing": matched_candidate,
+                    "reason": f"Matches existing transaction within {matched_candidate['day_diff']} days with identical amount (${inc_amt:.2f})"
+                })
+            else:
+                new_rows.append(inc_row.to_dict())
+
+        return pd.DataFrame(new_rows), pd.DataFrame(exact_dups), bookend_suspects
+
+
+class LedgerRepository:
+    def __init__(self, db_path: str):
+        self.db_path = db_path
+        os.makedirs(os.path.dirname(db_path), exist_ok=True)
+        self._ensure_schema()
+
+    def _get_connection(self):
+        return duckdb.connect(self.db_path)
+
+    def _ensure_schema(self):
+        con = self._get_connection()
+        con.execute("""
+            CREATE TABLE IF NOT EXISTS transactions (
+                date VARCHAR,
+                year_month VARCHAR,
+                year INTEGER,
+                month INTEGER,
+                description VARCHAR,
+                amount DOUBLE,
+                category VARCHAR,
+                sheet_source VARCHAR,
+                row_number BIGINT,
+                notes VARCHAR
+            )
+        """)
+        con.close()
+
+    def get_all_transactions(self) -> pd.DataFrame:
+        con = self._get_connection()
+        df = con.execute("SELECT * FROM transactions ORDER BY date DESC").df()
+        con.close()
+        return df
+
+    def append_transactions(self, df: pd.DataFrame, backup_csv_path: Optional[str] = None):
+        if df.empty:
+            return
+        con = self._get_connection()
+        # Add row_number if missing
+        if "row_number" not in df.columns:
+            df["row_number"] = None
+        con.register("incoming_batch", df)
+        con.execute("""
+            INSERT INTO transactions (date, year_month, year, month, description, amount, category, sheet_source, row_number, notes)
+            SELECT date, year_month, year, month, description, amount, category, sheet_source, row_number, notes
+            FROM incoming_batch
+        """)
+        con.close()
+
+        if backup_csv_path:
+            full_df = self.get_all_transactions()
+            full_df.to_csv(backup_csv_path, index=False)
+
+    def get_fire_summary(self, budget_plans: Dict[str, Dict[str, float]]) -> Dict[str, Any]:
+        """Calculates monthly and annual deficit vs plan matching your FIRE spreadsheet."""
+        con = self._get_connection()
+        df = con.execute("""
+            SELECT year_month, category, round(sum(amount), 2) as spend
+            FROM transactions
+            GROUP BY year_month, category
+            ORDER BY year_month, category
+        """).df()
+        con.close()
+
+        monthly_plans = budget_plans.get("monthly", {})
+        months = sorted(df["year_month"].unique())
+
+        monthly_breakdowns = []
+        for ym in months:
+            m_df = df[df["year_month"] == ym]
+            cat_spend = dict(zip(m_df["category"], m_df["spend"]))
+
+            row_data = {"year_month": ym}
+            total_monthly_spend = sum(cat_spend.values())
+            row_data["total_spend"] = total_monthly_spend
+
+            total_deficit = 0.0
+            for cat, plan in monthly_plans.items():
+                actual = cat_spend.get(cat, 0.0)
+                # Deficit formula: -(actual + plan) when actual is negative
+                # If plan is 750 and spend is -550, deficit is +(750 - 550) = +200 (surplus)
+                deficit = -1 * (actual + plan)
+                row_data[f"{cat}_spend"] = actual
+                row_data[f"{cat}_deficit"] = deficit
+                total_deficit += deficit
+
+            row_data["monthly_deficit_vs_plan"] = total_deficit
+            monthly_breakdowns.append(row_data)
+
+        return {
+            "monthly_report": pd.DataFrame(monthly_breakdowns),
+            "category_totals": df
+        }
