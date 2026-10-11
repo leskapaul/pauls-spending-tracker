@@ -89,6 +89,30 @@ def migrate():
     wb_formula = openpyxl.load_workbook(EXCEL_PATH, data_only=False)
     wb_val = openpyxl.load_workbook(EXCEL_PATH, data_only=True)
     
+    # Extract authoritative category links from yearly summary tabs (2022-2026)
+    cell_overrides = {}
+    yearly_sheets = [y for y in ["2022", "2023", "2024", "2025", "2026"] if y in wb_formula.sheetnames]
+    for y in yearly_sheets:
+        ws_y = wb_formula[y]
+        for r in range(1, 20):
+            lbl = str(ws_y.cell(row=r, column=1).value or "").strip()
+            form = str(ws_y.cell(row=r, column=2).value or "")
+            if form.startswith("="):
+                refs = re.findall(r"'([0-9]{6})'!([A-Z]+[0-9]+)", form)
+                cat = None
+                if "repair" in lbl.lower(): cat = "Repairs"
+                elif "vacation" in lbl.lower(): cat = "Vacations"
+                elif "upgrade" in lbl.lower() or "home" in lbl.lower(): cat = "Home Upgrades"
+                elif "groceries" in lbl.lower(): cat = "Groceries"
+                elif "discretionary" in lbl.lower(): cat = "Discretionary"
+                elif "data" in lbl.lower(): cat = "Data"
+                elif "utilities" in lbl.lower(): cat = "Utilities"
+                if cat:
+                    for s_target, cell_coord in refs:
+                        target_row = int(re.sub(r'[A-Z]+', '', cell_coord))
+                        cell_overrides[(s_target, target_row)] = cat
+    print(f"Extracted {len(cell_overrides)} authoritative cell overrides from yearly rollups.")
+
     monthly_sheet_names = sorted([s for s in wb_formula.sheetnames if s.isdigit() and len(s) == 6])
     print(f"Found {len(monthly_sheet_names)} monthly sheets: {monthly_sheet_names[0]} to {monthly_sheet_names[-1]}")
 
@@ -203,7 +227,19 @@ def migrate():
                 # If sheet had positive expenses without explicit multiply, check if majority are negative
                 pass
 
-            category = row_category_map.get(r, "Discretionary")
+            # Category resolution:
+            # 1. Authoritative cell override from yearly rollup
+            if (s_name, r) in cell_overrides:
+                category = cell_overrides[(s_name, r)]
+            else:
+                category = row_category_map.get(r, "Discretionary")
+                # 2. Check for named project keywords (shed, fireplace, mudroom, basement, etc.)
+                d_lower = desc_str.lower()
+                if any(k in d_lower for k in ["shed replacement", "fireplace reno", "103r basement", "side door mudroom", "landscaping", "electric upgrade"]):
+                    category = "Home Upgrades"
+                elif any(k in d_lower for k in ["rav4 prime", "furnace repair", "julian plumber", "tasker on taskrabbit", "first class plumbing"]):
+                    category = "Repairs"
+
             if not category or category == "":
                 category = "Discretionary"
 
