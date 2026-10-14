@@ -143,14 +143,14 @@ def migrate():
         # Scan for total rows
         total_rows = []
         for r in range(1, ws_f.max_row + 1):
-            row_vals = [ws_f.cell(row=r, column=c).value for c in range(1, 10)]
-            row_str = " ".join(str(v) for v in row_vals if v is not None).lower()
+            col3_val = ws_f.cell(row=r, column=3).value
+            col3_str = str(col3_val or "")
+            col2_val = str(ws_f.cell(row=r, column=2).value or "").lower()
+            col1_val = str(ws_f.cell(row=r, column=1).value or "").lower()
             
-            is_total_row = "total" in row_str or "subtotal" in row_str
-            
-            # Check if formula references other cells (subtotal/rollup) vs constant cash arithmetic
-            has_cell_ref = any(re.search(r'[a-z]+[0-9]+', str(v).lower()) for v in row_vals if str(v).startswith("="))
-            has_sum_formula = any(str(v).startswith("=") and "sum" in str(v).lower() for v in row_vals if v) and has_cell_ref
+            is_total_row = "total" in col2_val or "subtotal" in col2_val or "total" in col1_val
+            has_cell_ref = bool(re.search(r'[A-Za-z]+[0-9]+', col3_str))
+            has_sum_formula = col3_str.startswith("=") and "sum" in col3_str.lower() and has_cell_ref
             
             if is_total_row or has_sum_formula:
                 # Determine label
@@ -162,12 +162,13 @@ def migrate():
                         break
                 
                 # Extract formula
-                formula_str = ""
-                for col in range(1, 10):
-                    f_val = str(ws_f.cell(row=r, column=col).value or "")
-                    if f_val.startswith("="):
-                        formula_str = f_val
-                        break
+                formula_str = col3_str if col3_str.startswith("=") else ""
+                if not formula_str:
+                    for col in range(1, 10):
+                        f_val = str(ws_f.cell(row=r, column=col).value or "")
+                        if f_val.startswith("="):
+                            formula_str = f_val
+                            break
                 
                 cat_canonical = normalize_category_name(label)
                 needs_negate = "multiply(-1" in formula_str.lower().replace(" ", "")
@@ -256,13 +257,18 @@ def migrate():
             if (s_name, r) in cell_overrides:
                 category = cell_overrides[(s_name, r)]
             else:
-                category = row_category_map.get(r, "Discretionary")
-                # 2. Check for named project keywords (shed, fireplace, mudroom, basement, etc.)
-                d_lower = desc_str.lower()
-                if any(k in d_lower for k in ["shed replacement", "fireplace reno", "103r basement", "side door mudroom", "landscaping", "electric upgrade"]):
-                    category = "Home Upgrades"
-                elif any(k in d_lower for k in ["rav4 prime", "furnace repair", "julian plumber", "tasker on taskrabbit", "first class plumbing"]):
-                    category = "Repairs"
+                # Trust the sheet: only rows in the categorized blocks belong to those categories
+                category = row_category_map.get(r)
+                if not category:
+                    d_lower = desc_str.lower()
+                    if any(k in d_lower for k in ["attic upgrade", "shed replacement", "fireplace reno", "103r basement", "side door mudroom", "landscaping", "electric upgrade"]):
+                        category = "Home Upgrades"
+                    elif any(k in d_lower for k in ["9049", "plumbing", "furnace repair", "rav4 prime", "julian plumber", "tasker on taskrabbit", "first class plumbing"]):
+                        category = "Repairs"
+                    elif any(k in d_lower for k in ["zelle payment to rena goldin", "deposit *mobile"]):
+                        category = "Shared / Reimbursements"
+                    else:
+                        category = "Off-Budget / Uncategorized"
 
             if not category or category == "":
                 category = "Discretionary"
