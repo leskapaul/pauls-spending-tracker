@@ -213,10 +213,22 @@ with tab_overview:
     st.markdown("---")
 
     # Visual Trends
-    st.subheader("Monthly Spending by Category Over Time")
-    cat_monthly = all_df.groupby(["year_month", "category"])["amount"].sum().abs().reset_index()
-    pivot_monthly = cat_monthly.pivot(index="year_month", columns="category", values="amount").fillna(0)
-    st.bar_chart(pivot_monthly)
+    st.subheader("Core Monthly Spending Over Time (Baseline Budget)")
+    st.caption("Shows your 4 core living categories: Discretionary, Groceries, Data, and Utilities.")
+    core_cats = ["Discretionary", "Groceries", "Data", "Utilities"]
+    core_df = all_df[all_df["category"].isin(core_cats)]
+    core_monthly = core_df.groupby(["year_month", "category"])["amount"].sum().abs().reset_index()
+    pivot_core = core_monthly.pivot(index="year_month", columns="category", values="amount").fillna(0)
+    pivot_core = pivot_core[[c for c in core_cats if c in pivot_core.columns]]
+    st.bar_chart(pivot_core)
+
+    st.subheader("Periodic & Capital Spending Over Time (Lump-Sum & Non-Operating)")
+    st.caption("Shows Vacations, Repairs, Home Upgrades, Auto, Healthcare, and Off-Budget items.")
+    other_df = all_df[~all_df["category"].isin(core_cats)]
+    if not other_df.empty:
+        other_monthly = other_df.groupby(["year_month", "category"])["amount"].sum().abs().reset_index()
+        pivot_other = other_monthly.pivot(index="year_month", columns="category", values="amount").fillna(0)
+        st.bar_chart(pivot_other)
 
     # Multi-Year Category Comparison Table
     st.subheader("Multi-Year Category Monthly Averages Comparison (2022 – 2026)")
