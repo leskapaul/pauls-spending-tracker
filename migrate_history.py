@@ -10,8 +10,18 @@ import datetime
 import duckdb
 import pandas as pd
 import openpyxl
+import glob
+import sys
 
-EXCEL_PATH = os.path.expanduser("~/Downloads/Spending.xlsx")
+def find_latest_excel_path() -> str:
+    downloads = os.path.expanduser("~/Downloads")
+    candidates = glob.glob(os.path.join(downloads, "Spending*.xlsx"))
+    if candidates:
+        candidates.sort(key=os.path.getmtime, reverse=True)
+        return candidates[0]
+    return os.path.join(downloads, "Spending.xlsx")
+
+EXCEL_PATH = sys.argv[1] if len(sys.argv) > 1 else find_latest_excel_path()
 DATA_DIR = os.path.expanduser("~/dev/personal-finance/data")
 DB_PATH = os.path.join(DATA_DIR, "spending.duckdb")
 BACKUP_CSV_PATH = os.path.join(DATA_DIR, "spending_ledger.csv")
