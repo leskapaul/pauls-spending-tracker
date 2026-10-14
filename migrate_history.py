@@ -148,8 +148,9 @@ def migrate():
             
             is_total_row = "total" in row_str or "subtotal" in row_str
             
-            # Also check if column C has a SUM formula without explicit 'total' text
-            has_sum_formula = any(str(v).startswith("=") and "sum" in str(v).lower() for v in row_vals if v)
+            # Check if formula references other cells (subtotal/rollup) vs constant cash arithmetic
+            has_cell_ref = any(re.search(r'[a-z]+[0-9]+', str(v).lower()) for v in row_vals if str(v).startswith("="))
+            has_sum_formula = any(str(v).startswith("=") and "sum" in str(v).lower() for v in row_vals if v) and has_cell_ref
             
             if is_total_row or has_sum_formula:
                 # Determine label
@@ -173,7 +174,8 @@ def migrate():
 
                 # If formula explicitly gives cell ranges like C3:C21
                 ranges = re.findall(r'C([0-9]+):C([0-9]+)', formula_str, re.IGNORECASE)
-                singles = re.findall(r'C([0-9]+)(?!:)', formula_str, re.IGNORECASE)
+                formula_no_ranges = re.sub(r'C[0-9]+:C[0-9]+', '', formula_str, flags=re.IGNORECASE)
+                singles = re.findall(r'C([0-9]+)', formula_no_ranges, re.IGNORECASE)
                 
                 if ranges or singles:
                     for s_r, e_r in ranges:
@@ -196,8 +198,18 @@ def migrate():
                     block_negate_map[r] = needs_negate
             prev_r = t_row
 
+        total_row_indices = {t[0] for t in total_rows}
+
         # 2. Extract transaction rows
         for r in range(2, ws_v.max_row + 1):
+            if r in total_row_indices:
+                continue
+
+            # Check if this row in the formula sheet contains a subtotal/rollup formula (has cell references)
+            cell_f_amt = ws_f.cell(row=r, column=3).value
+            if cell_f_amt and str(cell_f_amt).startswith("=") and re.search(r'[A-Za-z]+[0-9]+', str(cell_f_amt)):
+                continue
+
             date_raw = ws_v.cell(row=r, column=1).value
             desc_raw = ws_v.cell(row=r, column=2).value
             amt_raw = ws_v.cell(row=r, column=3).value
@@ -218,6 +230,8 @@ def migrate():
             
             # Skip summary rows, totals, and blank descriptions
             if any(w in desc_str.lower() for w in ["total", "subtotal", "average", "months so far"]):
+                continue
+            if not date_raw and desc_str.lower() in ["groceries", "utilities", "data", "discretionary", "vacations", "repairs", "auto", "home upgrades"]:
                 continue
             if desc_str.lower().startswith("due ") and not date_raw:
                 continue

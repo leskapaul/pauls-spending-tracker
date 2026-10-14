@@ -120,11 +120,11 @@ exclude_patterns:
 
 budget_plans:
   monthly:
-    Groceries: 750.00
-    Discretionary: 4000.00
+    Groceries: 600.00
+    Discretionary: 4800.00
     Data: 200.00
-    Utilities: 250.00
+    Utilities: 300.00
   annual:
-    Vacations: 12000.00
+    Vacations: 18000.00
     Repairs: 3000.00
 

@@ -301,3 +301,11 @@ class TestLedgerRepository:
             assert cash_row["category"] == "Discretionary"
             assert cash_row["year_month"] == "2024-01"
             assert cash_row["sheet_source"] == "Manual Entry"
+
+            # Test get_yearly_fire_rollup
+            yearly_rollup = repo.get_yearly_fire_rollup(2024, rule_config.budget_plans)
+            assert yearly_rollup["year"] == 2024
+            assert yearly_rollup["months_so_far"] == 1
+            assert "baseline_df" in yearly_rollup
+            assert "annual_periodic_df" in yearly_rollup
+            assert "capital_df" in yearly_rollup

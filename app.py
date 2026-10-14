@@ -124,63 +124,110 @@ tab_overview, tab_ledger, tab_ingest = st.tabs([
 # TAB 1: FIRE Analytics & Plan Deficit Tracking
 # -------------------------------------------------------------
 with tab_overview:
-    st.header("FIRE Expense Rollup & Deficit vs. Plan")
-    st.markdown("""
-    Automatically computes your monthly and yearly averages and compares them against your 
-    target **Plan**—eliminating the need to manually link formulas across 55+ spreadsheet tabs.
-    """)
+    col_t1, col_t2 = st.columns([3, 1])
+    with col_t1:
+        st.header("FIRE Expense Rollup & Deficit vs. Plan")
+        st.markdown("Tracked identically to your Excel annual summary tabs (`2026`, `2025`, etc.).")
+    with col_t2:
+        available_years = sorted(all_df["year"].unique(), reverse=True)
+        selected_year = st.selectbox("Select Year", available_years, index=0)
 
-    # Deficit vs Plan Calculation
-    fire_summary = repo.get_fire_summary(config.budget_plans)
-    monthly_rep = fire_summary["monthly_report"]
-
-    # Top KPI Cards
-    col1, col2, col3, col4 = st.columns(4)
-    with col1:
-        latest_month = monthly_rep.iloc[-1]["year_month"]
-        latest_spend = abs(monthly_rep.iloc[-1]["total_spend"])
-        st.metric(f"Latest Month ({latest_month})", f"${latest_spend:,.2f}")
-    with col2:
-        latest_deficit = monthly_rep.iloc[-1]["monthly_deficit_vs_plan"]
+    # Get annual rollup for the selected year
+    yearly_rollup = repo.get_yearly_fire_rollup(selected_year, config.budget_plans)
+    
+    # KPI Metrics
+    kpi1, kpi2, kpi3, kpi4 = st.columns(4)
+    with kpi1:
+        st.metric(f"Months So Far ({selected_year})", f"{yearly_rollup['months_so_far']} months")
+    with kpi2:
+        m_def = yearly_rollup['monthly_deficit_vs_plan']
+        # Deficit sign convention: negative = surplus (favorable), positive = deficit (unfavorable)
         st.metric(
-            "Latest Deficit vs Plan",
-            f"${latest_deficit:,.2f}",
-            delta=f"{'-' if latest_deficit < 0 else '+'}${abs(latest_deficit):,.2f}",
-            delta_color="normal"
+            "Monthly Deficit vs Plan",
+            f"${abs(m_def):,.2f}",
+            delta=f"{'-' if m_def < 0 else '+'}${abs(m_def):,.2f} ({'Surplus' if m_def <= 0 else 'Deficit'})",
+            delta_color="inverse"
         )
-    with col3:
-        avg_monthly = abs(all_df.groupby("year_month")["amount"].sum().mean())
-        st.metric("Avg Monthly Burn", f"${avg_monthly:,.2f}")
-    with col4:
-        total_months = all_df["year_month"].nunique()
-        st.metric("Months Tracked", f"{total_months}")
+    with kpi3:
+        ann_def = yearly_rollup['projected_annual_deficit']
+        st.metric(
+            "Projected Annual Deficit",
+            f"${abs(ann_def):,.2f}",
+            delta=f"{'-' if ann_def < 0 else '+'}${abs(ann_def):,.2f} ({'Surplus' if ann_def <= 0 else 'Deficit'})",
+            delta_color="inverse"
+        )
+    with kpi4:
+        cap_spent = abs(yearly_rollup['total_capital_spend'])
+        st.metric("Capital Projects YTD", f"${cap_spent:,.2f}")
 
     st.markdown("---")
 
-    # Chart 1: Monthly Spend Trend
+    # Section 1: Baseline Monthly Categories
+    st.subheader(f"1. Baseline Monthly Averages (Year {selected_year})")
+    st.caption("Averaged across the months elapsed so far this year. Deficit formula: `-(Actual + Plan)`.")
+    base_df = yearly_rollup["baseline_df"].copy()
+    st.dataframe(
+        base_df.style.format({
+            "Actual Total": "${:,.2f}",
+            "Actual Avg / Mo": "${:,.2f}",
+            "Plan / Mo": "${:,.2f}",
+            "Deficit / Mo": "${:,.2f}",
+        }),
+        use_container_width=True
+    )
+    if yearly_rollup['monthly_deficit_vs_plan'] <= 0:
+        st.success(f"**Monthly Deficit vs Plan**: **-${abs(yearly_rollup['monthly_deficit_vs_plan']):,.2f}** (Under budget / surplus across baseline categories)")
+    else:
+        st.error(f"**Monthly Deficit vs Plan**: **+${yearly_rollup['monthly_deficit_vs_plan']:,.2f}** (Over budget across baseline categories)")
+
+    # Section 2: Periodic Annual Buckets
+    st.subheader("2. Periodic Annual Buckets (Year-to-Date vs. Full Year Plan)")
+    st.caption("Tracked as cumulative annual totals. Formula: `-(Actual Total + Annual Plan)`.")
+    ann_df = yearly_rollup["annual_periodic_df"].copy()
+    st.dataframe(
+        ann_df.style.format({
+            "Actual YTD Total": "${:,.2f}",
+            "Annual Plan": "${:,.2f}",
+            "Deficit vs Plan": "${:,.2f}",
+        }),
+        use_container_width=True
+    )
+    
+    st.info(
+        f"**Projected Annual Deficit vs Plan**: **{'-' if yearly_rollup['projected_annual_deficit'] < 0 else '+'}${abs(yearly_rollup['projected_annual_deficit']):,.2f}** "
+        f"(= (Monthly Deficit ${yearly_rollup['monthly_deficit_vs_plan']:,.2f} × 12) + Periodic Deficits ${yearly_rollup['annual_periodic_deficit']:,.2f})"
+    )
+
+    # Section 3: Capital & Non-Operating Expenditures
+    if not yearly_rollup["capital_df"].empty:
+        st.subheader("3. Capital & Non-Operating Expenditures (Tracked Separately)")
+        st.caption("Excluded from operating baseline so major home renovations and capital repairs do not skew your FIRE burn rate.")
+        cap_df = yearly_rollup["capital_df"].copy()
+        st.dataframe(
+            cap_df.style.format({
+                "Total Spent": "${:,.2f}",
+            }),
+            use_container_width=True
+        )
+
+    st.markdown("---")
+
+    # Visual Trends
     st.subheader("Monthly Spending by Category Over Time")
     cat_monthly = all_df.groupby(["year_month", "category"])["amount"].sum().abs().reset_index()
     pivot_monthly = cat_monthly.pivot(index="year_month", columns="category", values="amount").fillna(0)
     st.bar_chart(pivot_monthly)
 
-    # Chart 2: Deficit vs Plan Over Time
-    st.subheader("Monthly Deficit / Surplus vs. Plan ($)")
-    deficit_chart_df = monthly_rep.set_index("year_month")[["monthly_deficit_vs_plan"]]
-    st.line_chart(deficit_chart_df)
-
-    # Annual Rollup Table (Matching your Excel yearly tabs)
-    st.subheader("Annual Category Averages vs. Planned Budgets")
-    
+    # Multi-Year Category Comparison Table
+    st.subheader("Multi-Year Category Monthly Averages Comparison (2022 – 2026)")
     annual_summary = all_df.groupby(["year", "category"])["amount"].sum().abs().reset_index()
-    # Count unique months per year
     months_per_year = all_df.groupby("year")["month"].nunique().to_dict()
     annual_summary["months_in_year"] = annual_summary["year"].map(months_per_year)
     annual_summary["monthly_avg"] = round(annual_summary["amount"] / annual_summary["months_in_year"], 2)
 
     pivot_annual = annual_summary.pivot(index="category", columns="year", values="monthly_avg").fillna(0)
-    # Add Planned column
     monthly_plan_dict = config.budget_plans.get("monthly", {})
-    pivot_annual["Planned / Mo"] = pivot_annual.index.map(lambda c: monthly_plan_dict.get(c, "-"))
+    pivot_annual["Target Plan / Mo"] = pivot_annual.index.map(lambda c: monthly_plan_dict.get(c, "-"))
     st.dataframe(pivot_annual.style.format(precision=2), use_container_width=True)
 
 # -------------------------------------------------------------

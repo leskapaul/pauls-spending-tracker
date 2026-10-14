@@ -415,3 +415,99 @@ class LedgerRepository:
             "monthly_report": pd.DataFrame(monthly_breakdowns),
             "category_totals": df
         }
+
+    def get_yearly_fire_rollup(self, year: int, budget_plans: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Computes the annual FIRE rollup matching the layout and formulas of tab '2026' in the spreadsheet:
+        1. Months So Far in the specified year.
+        2. Baseline Monthly Categories (Groceries, Discretionary, Data, Utilities) averaged over months so far,
+           compared against monthly plan, computing individual deficits and the overall Monthly Deficit vs Plan.
+        3. Periodic Annual Buckets (Repairs, Vacations) comparing YTD total against full-year plan.
+        4. Projected Annual Deficit vs Plan = (Monthly Deficit vs Plan * 12) + Repairs Deficit + Vacations Deficit.
+        5. Capital / Non-operating Projects (Home Upgrades, Bespoke Property Maintenance, Auto, Healthcare)
+           tracked separately so they do not distort operating deficit.
+        """
+        year = int(year)
+        con = self._get_connection()
+        months_so_far = con.execute("SELECT count(distinct year_month) FROM transactions WHERE year = ?", [year]).fetchone()[0] or 1
+        
+        cat_df = con.execute("""
+            SELECT category, round(sum(amount), 2) as total_spend, count(*) as tx_count
+            FROM transactions
+            WHERE year = ?
+            GROUP BY category
+            ORDER BY total_spend ASC
+        """, [year]).df()
+        con.close()
+
+        cat_spend_map = dict(zip(cat_df["category"], cat_df["total_spend"]))
+        cat_count_map = dict(zip(cat_df["category"], cat_df["tx_count"]))
+
+        monthly_plans = budget_plans.get("monthly", {})
+        annual_plans = budget_plans.get("annual", {})
+
+        # 1. Baseline Monthly Categories
+        baseline_rows = []
+        monthly_deficit_sum = 0.0
+        for cat in ["Groceries", "Discretionary", "Data", "Utilities"]:
+            actual_total = cat_spend_map.get(cat, 0.0)
+            actual_avg = round(actual_total / months_so_far, 2)
+            plan = monthly_plans.get(cat, 0.0)
+            # In Excel: =MULTIPLY(-1, SUM(B2, C2)) where actual is negative and plan is positive
+            deficit = round(-1.0 * (actual_avg + plan), 2)
+            monthly_deficit_sum += deficit
+            status = "Surplus" if deficit <= 0 else "Deficit"
+            baseline_rows.append({
+                "Category": cat,
+                "Actual Total": actual_total,
+                "Actual Avg / Mo": actual_avg,
+                "Plan / Mo": plan,
+                "Deficit / Mo": deficit,
+                "Status": status
+            })
+
+        # 2. Periodic Annual Buckets
+        annual_rows = []
+        annual_periodic_deficit_sum = 0.0
+        for cat in ["Repairs", "Vacations"]:
+            actual_total = cat_spend_map.get(cat, 0.0)
+            plan = annual_plans.get(cat, 0.0)
+            # In Excel: =MULTIPLY(-1, SUM(B10, C10))
+            deficit = round(-1.0 * (actual_total + plan), 2)
+            annual_periodic_deficit_sum += deficit
+            status = "Surplus" if deficit <= 0 else "Deficit"
+            annual_rows.append({
+                "Category": cat,
+                "Actual YTD Total": actual_total,
+                "Annual Plan": plan,
+                "Deficit vs Plan": deficit,
+                "Status": status
+            })
+
+        # Projected Annual Deficit = (monthly deficit * 12) + periodic deficits
+        projected_annual_deficit = round((monthly_deficit_sum * 12) + annual_periodic_deficit_sum, 2)
+
+        # 3. Capital / Non-operating Projects
+        excluded_cats = set(monthly_plans.keys()) | set(annual_plans.keys())
+        capital_rows = []
+        total_capital = 0.0
+        for cat, tot in cat_spend_map.items():
+            if cat not in excluded_cats:
+                capital_rows.append({
+                    "Category": cat,
+                    "Total Spent": tot,
+                    "Transactions": cat_count_map.get(cat, 0)
+                })
+                total_capital += tot
+
+        return {
+            "year": year,
+            "months_so_far": months_so_far,
+            "baseline_df": pd.DataFrame(baseline_rows),
+            "monthly_deficit_vs_plan": round(monthly_deficit_sum, 2),
+            "annual_periodic_df": pd.DataFrame(annual_rows),
+            "annual_periodic_deficit": round(annual_periodic_deficit_sum, 2),
+            "projected_annual_deficit": projected_annual_deficit,
+            "capital_df": pd.DataFrame(capital_rows),
+            "total_capital_spend": round(total_capital, 2)
+        }
