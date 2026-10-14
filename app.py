@@ -50,6 +50,47 @@ def get_engine_components():
 
 config, normalizer, dedup, repo = get_engine_components()
 
+def render_manual_transaction_form(key_prefix: str, repo: LedgerRepository, config: RuleConfig, default_date: datetime.date):
+    """Renders a clean form to log manual expenses (like cash spending) directly into the ledger."""
+    with st.form(f"{key_prefix}_manual_form", clear_on_submit=True):
+        st.markdown("##### 💵 Log Manual / Cash Expense")
+        c1, c2, c3 = st.columns([2, 3, 2])
+        with c1:
+            m_date = st.date_input("Date", value=default_date, key=f"{key_prefix}_date")
+        with c2:
+            m_desc = st.text_input("Description / Payee", placeholder="e.g. Paul Cash Spending / Farmers Market", key=f"{key_prefix}_desc")
+        with c3:
+            m_amt = st.number_input("Amount ($)", min_value=0.01, step=5.0, format="%.2f", key=f"{key_prefix}_amt")
+
+        c4, c5 = st.columns([2, 5])
+        with c4:
+            m_type = st.radio("Type", ["Expense (-)", "Credit / Refund (+)"], horizontal=True, key=f"{key_prefix}_type")
+        with c5:
+            all_cat_options = sorted(list(config.categories.keys()) + ["Discretionary", "Shared / Reimbursements"])
+            default_cat_idx = all_cat_options.index("Discretionary") if "Discretionary" in all_cat_options else 0
+            m_cat = st.selectbox("Category", options=all_cat_options, index=default_cat_idx, key=f"{key_prefix}_cat")
+
+        m_notes = st.text_input("Notes / Split Details (Optional)", placeholder="e.g. 10 gas, 40 brewery, 20 wood, 100 dinner", key=f"{key_prefix}_notes")
+
+        submitted = st.form_submit_button("➕ Save Transaction to Ledger", type="primary")
+        if submitted:
+            if not m_desc.strip():
+                st.error("Please provide a description.")
+            else:
+                final_amt = -abs(m_amt) if m_type.startswith("Expense") else abs(m_amt)
+                repo.add_single_transaction(
+                    date_str=m_date.strftime("%Y-%m-%d"),
+                    description=m_desc.strip(),
+                    amount=final_amt,
+                    category=m_cat,
+                    notes=m_notes.strip(),
+                    source="Manual Entry",
+                    backup_csv_path=BACKUP_CSV_PATH
+                )
+                st.success(f"Successfully added '{m_desc.strip()}' (${final_amt:.2f}) to {m_cat}!")
+                st.cache_resource.clear()
+                st.rerun()
+
 # Sidebar
 st.sidebar.title("💰 FIRE Finance")
 st.sidebar.markdown("*Single-stream transaction ledger & FIRE analytics*")
@@ -152,6 +193,9 @@ with tab_ledger:
         st.markdown("All 5,472+ historical transactions in a single continuous stream.")
     with col_h2:
         edit_mode = st.toggle("✏️ Edit Ledger Mode", value=False, help="Enable inline editing of categories, notes, or deleting rows.")
+
+    with st.expander("➕ Log Cash / Manual Transaction", expanded=False):
+        render_manual_transaction_form("ledger", repo, config, max_date)
 
     f_col1, f_col2, f_col3, f_col4 = st.columns([2, 2, 2, 2])
     with f_col1:
@@ -267,6 +311,11 @@ with tab_ingest:
     The engine will normalize column names, classify categories via regex, and 
     **flag monthly bookend duplicates** so you never double-count overlapping dates.
     """)
+
+    with st.expander("💵 Need to log Cash Spending or a Manual Entry for this Month?", expanded=False):
+        render_manual_transaction_form("ingest", repo, config, max_date)
+
+    st.markdown("---")
 
     uploaded_files = st.file_uploader(
         "Upload one or more Bank CSV exports",

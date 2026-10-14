@@ -335,6 +335,32 @@ class LedgerRepository:
             full_df = self.get_all_transactions()
             full_df.to_csv(backup_csv_path, index=False)
 
+    def add_single_transaction(
+        self,
+        date_str: str,
+        description: str,
+        amount: float,
+        category: str,
+        notes: str = "",
+        source: str = "Manual Entry",
+        backup_csv_path: Optional[str] = None
+    ):
+        """Adds a single manual/cash transaction to the ledger and CSV backup."""
+        dt = datetime.datetime.strptime(date_str, "%Y-%m-%d")
+        record = pd.DataFrame([{
+            "date": date_str,
+            "year_month": dt.strftime("%Y-%m"),
+            "year": dt.year,
+            "month": dt.month,
+            "description": description.strip(),
+            "amount": round(amount, 2),
+            "category": category.strip(),
+            "sheet_source": source,
+            "row_number": None,
+            "notes": notes.strip()
+        }])
+        self.append_transactions(record, backup_csv_path=backup_csv_path)
+
     def update_all_transactions(self, df: pd.DataFrame, backup_csv_path: Optional[str] = None):
         """Overwrites transactions table with edited DataFrame (for manual inline edits in UI)."""
         con = self._get_connection()

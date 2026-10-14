@@ -284,3 +284,20 @@ class TestLedgerRepository:
             repo.update_all_transactions(modified)
             reloaded = repo.get_all_transactions()
             assert reloaded.loc[reloaded["description"] == "Shoprite", "category"].iloc[0] == "Home Upgrades"
+
+            # Test add_single_transaction (e.g. manual cash spend)
+            repo.add_single_transaction(
+                date_str="2024-01-20",
+                description="Paul Cash Spending",
+                amount=-170.00,
+                category="Discretionary",
+                notes="10 gas, 40 brewery, 20 wood, 100 dinner",
+                source="Manual Entry"
+            )
+            with_cash = repo.get_all_transactions()
+            assert len(with_cash) == 3
+            cash_row = with_cash.loc[with_cash["description"] == "Paul Cash Spending"].iloc[0]
+            assert cash_row["amount"] == -170.00
+            assert cash_row["category"] == "Discretionary"
+            assert cash_row["year_month"] == "2024-01"
+            assert cash_row["sheet_source"] == "Manual Entry"
