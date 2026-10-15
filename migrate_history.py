@@ -12,6 +12,7 @@ import pandas as pd
 import openpyxl
 import glob
 import sys
+from typing import Optional, Dict, List, Tuple
 
 def find_latest_excel_path() -> str:
     downloads = os.path.expanduser("~/Downloads")
@@ -36,7 +37,6 @@ CATEGORY_CANONICAL = {
     "utilies": "Utilities",
     "vacation": "Vacations",
     "vacations": "Vacations",
-    "disney vacay": "Vacations",
     "travel": "Vacations",
     "repairs": "Repairs",
     "home upgrade": "Home Upgrades",
@@ -50,16 +50,15 @@ CATEGORY_CANONICAL = {
     "property maintenance": "Property Maintenance",
     "amazon": "Discretionary",
     "amazon card": "Discretionary",
+    "cash spending": "Discretionary",
+    "paul's cash": "Discretionary",
+    "jing's cash": "Discretionary",
     "healthcare": "Healthcare",
-    "due jing": "Shared / Reimbursements",
-    "more due jing": "Shared / Reimbursements",
-    "paid jing": "Shared / Reimbursements",
-    "reimburse jing": "Shared / Reimbursements",
-    "jing cash spending": "Shared / Reimbursements",
-    "adjustment for jing": "Shared / Reimbursements",
-    "aaron for sushi": "Discretionary",
-    "njt mobile": "Discretionary",
 }
+
+def is_monthly_sheet(sheet_name: str) -> bool:
+    """Rule 1: Monthly sheets have 6-digit numeric names (YYYYMM)."""
+    return bool(sheet_name and str(sheet_name).isdigit() and len(str(sheet_name)) == 6)
 
 def excel_serial_to_date(val):
     """Converts Excel serial number, string, or datetime to YYYY-MM-DD."""
@@ -73,7 +72,6 @@ def excel_serial_to_date(val):
         dt = base + datetime.timedelta(days=int(val))
         return dt.strftime("%Y-%m-%d")
     val_str = str(val).strip()
-    # Try common formats
     for fmt in ("%Y-%m-%d", "%m/%d/%Y", "%Y-%m-%d %H:%M:%S"):
         try:
             return datetime.datetime.strptime(val_str, fmt).strftime("%Y-%m-%d")
@@ -81,7 +79,28 @@ def excel_serial_to_date(val):
             pass
     return val_str[:10]
 
-def normalize_category_name(raw_name):
+VALID_CATEGORIES = {
+    "Groceries",
+    "Discretionary",
+    "Data",
+    "Utilities",
+    "Repairs",
+    "Vacations",
+    "Home Upgrades",
+    "Property Maintenance",
+    "Healthcare",
+}
+
+REIMBURSEMENT_KEYWORDS = [
+    "due jing",
+    "paid jing",
+    "reimburse jing",
+    "more due jing",
+    "adjustment for jing",
+]
+
+def normalize_category_name(raw_name: str) -> str:
+    """Normalizes category section headers within monthly sheets."""
     if not raw_name:
         return "Discretionary"
     clean = raw_name.strip()
@@ -91,207 +110,222 @@ def normalize_category_name(raw_name):
     for pattern, canonical in CATEGORY_CANONICAL.items():
         if pattern in clean_lower:
             return canonical
-    return clean.title()
+    title_case = clean.title()
+    if title_case in VALID_CATEGORIES:
+        return title_case
+    return "Off-Budget / Uncategorized"
 
-def migrate():
-    os.makedirs(DATA_DIR, exist_ok=True)
-    print(f"Loading workbook from {EXCEL_PATH}...")
-    wb_formula = openpyxl.load_workbook(EXCEL_PATH, data_only=False)
-    wb_val = openpyxl.load_workbook(EXCEL_PATH, data_only=True)
-    
-    # Extract authoritative category links from yearly summary tabs (2022-2026)
+def categorize_rollup_label(lbl: str) -> Optional[str]:
+    """Rule 1 & 3: Maps label in rollup sheets to canonical budget categories."""
+    if not lbl:
+        return None
+    lbl_lower = lbl.lower()
+    if any(k in lbl_lower for k in ["bespoke", "investment repair", "property"]):
+        return "Property Maintenance"
+    if "repair" in lbl_lower:
+        return "Repairs"
+    if "vacation" in lbl_lower:
+        return "Vacations"
+    if any(k in lbl_lower for k in ["home upgrade", "home improvement", "upgrade"]):
+        return "Home Upgrades"
+    if "groceries" in lbl_lower or "grocery" in lbl_lower:
+        return "Groceries"
+    if "discretionary" in lbl_lower:
+        return "Discretionary"
+    if "data" in lbl_lower:
+        return "Data"
+    if "utilities" in lbl_lower or "utilies" in lbl_lower:
+        return "Utilities"
+    return None
+
+def extract_rollup_associations(wb_formula) -> dict:
+    """
+    Rule 1 & 3:
+    Scans all rollup sheets (sheets whose names do NOT correspond to months)
+    and extracts cell references that explicitly map monthly sheet rows
+    to known budget categories.
+    """
     cell_overrides = {}
-    yearly_sheets = [y for y in ["2022", "2023", "2024", "2025", "2026"] if y in wb_formula.sheetnames]
-    for y in yearly_sheets:
-        ws_y = wb_formula[y]
-        for r in range(1, 20):
-            lbl = str(ws_y.cell(row=r, column=1).value or "").strip()
-            form = str(ws_y.cell(row=r, column=2).value or "")
-            if form.startswith("="):
-                refs = re.findall(r"'([0-9]{6})'!([A-Z]+[0-9]+)", form)
-                cat = None
-                if "repair" in lbl.lower(): cat = "Repairs"
-                elif "vacation" in lbl.lower(): cat = "Vacations"
-                elif "upgrade" in lbl.lower() or "home" in lbl.lower(): cat = "Home Upgrades"
-                elif "groceries" in lbl.lower(): cat = "Groceries"
-                elif "discretionary" in lbl.lower(): cat = "Discretionary"
-                elif "data" in lbl.lower(): cat = "Data"
-                elif "utilities" in lbl.lower(): cat = "Utilities"
-                if cat:
-                    for s_target, cell_coord in refs:
-                        target_row = int(re.sub(r'[A-Z]+', '', cell_coord))
-                        cell_overrides[(s_target, target_row)] = cat
-    print(f"Extracted {len(cell_overrides)} authoritative cell overrides from yearly rollups.")
+    rollup_sheets = [s for s in wb_formula.sheetnames if not is_monthly_sheet(s)]
+    for s_name in rollup_sheets:
+        ws_r = wb_formula[s_name]
+        for r in range(1, ws_r.max_row + 1):
+            for c in range(1, ws_r.max_column + 1):
+                val = str(ws_r.cell(row=r, column=c).value or "")
+                if "=" in val:
+                    refs = re.findall(r"'([0-9]{6})'!([A-Z]+[0-9]+)", val)
+                    if refs:
+                        lbl = str(ws_r.cell(row=r, column=1).value or ws_r.cell(row=r, column=c - 1).value or "").strip()
+                        cat = categorize_rollup_label(lbl)
+                        if cat:
+                            for s_target, coord in refs:
+                                t_row = int(re.sub(r'[A-Z]+', '', coord))
+                                cell_overrides[(s_target, t_row)] = cat
+    return cell_overrides
 
-    monthly_sheet_names = sorted([s for s in wb_formula.sheetnames if s.isdigit() and len(s) == 6])
+def parse_monthly_sheet(ws_f, ws_v, sheet_name: str, cell_overrides: dict) -> list:
+    """
+    Parses a single monthly sheet strictly following rules 2 and 3:
+    - Rule 2: Considers only the first 4 columns (Date, Description, Amount, Notes).
+              Reimbursement rows like 'due jing' or 'paid jing' are ignored.
+    - Rule 3: Unsectioned/bottom transactions default to 'Off-Budget / Uncategorized',
+      unless explicitly referenced by a rollup sheet in cell_overrides.
+    """
+    year_str = sheet_name[:4]
+    month_str = sheet_name[4:]
+    year_month = f"{year_str}-{month_str}"
+
+    row_category_map = {}
+    block_negate_map = {}
+    total_rows = []
+
+    # 1. Map rows to categories using formula ranges and block boundaries
+    for r in range(1, ws_f.max_row + 1):
+        col3_val = ws_f.cell(row=r, column=3).value
+        col3_str = str(col3_val or "")
+        col2_val = str(ws_f.cell(row=r, column=2).value or "").lower()
+        col1_val = str(ws_f.cell(row=r, column=1).value or "").lower()
+
+        # Rule 2: Ignore reimbursement calculation rows
+        if any(k in (col1_val + " " + col2_val) for k in REIMBURSEMENT_KEYWORDS):
+            continue
+
+        is_total_row = "total" in col2_val or "subtotal" in col2_val or "total" in col1_val
+        has_cell_ref = bool(re.search(r'[A-Za-z]+[0-9]+', col3_str))
+        has_sum_formula = col3_str.startswith("=") and "sum" in col3_str.lower() and has_cell_ref
+
+        if is_total_row or has_sum_formula:
+            label = ""
+            # Rule 2: Strictly within columns 1 to 4
+            for col in (2, 4, 1):
+                v = ws_f.cell(row=r, column=col).value
+                if v and isinstance(v, str) and not str(v).startswith("="):
+                    label = v.strip()
+                    break
+
+            formula_str = col3_str if col3_str.startswith("=") else ""
+            cat_canonical = normalize_category_name(label)
+            needs_negate = "multiply(-1" in formula_str.lower().replace(" ", "")
+
+            ranges = re.findall(r'C([0-9]+):C([0-9]+)', formula_str, re.IGNORECASE)
+            formula_no_ranges = re.sub(r'C[0-9]+:C[0-9]+', '', formula_str, flags=re.IGNORECASE)
+            singles = re.findall(r'C([0-9]+)', formula_no_ranges, re.IGNORECASE)
+
+            if ranges or singles:
+                for s_r, e_r in ranges:
+                    for tr in range(int(s_r), int(e_r) + 1):
+                        row_category_map[tr] = cat_canonical
+                        block_negate_map[tr] = needs_negate
+                for sr in singles:
+                    row_category_map[int(sr)] = cat_canonical
+                    block_negate_map[int(sr)] = needs_negate
+
+            total_rows.append((r, cat_canonical, needs_negate))
+
+    # Sequential block fallback for rows inside sections
+    prev_r = 1
+    for t_row, cat_canonical, needs_negate in total_rows:
+        for r in range(prev_r + 1, t_row):
+            if r not in row_category_map:
+                row_category_map[r] = cat_canonical
+                block_negate_map[r] = needs_negate
+        prev_r = t_row
+
+    total_row_indices = {t[0] for t in total_rows}
+    records = []
+
+    # 2. Extract transaction rows
+    for r in range(2, ws_v.max_row + 1):
+        if r in total_row_indices:
+            continue
+
+        # Check if this row in the formula sheet contains a subtotal/rollup formula
+        cell_f_amt = ws_f.cell(row=r, column=3).value
+        if cell_f_amt and str(cell_f_amt).startswith("=") and re.search(r'[A-Za-z]+[0-9]+', str(cell_f_amt)):
+            continue
+
+        # Rule 2: Strictly read columns 1 to 4 only
+        date_raw = ws_v.cell(row=r, column=1).value
+        desc_raw = ws_v.cell(row=r, column=2).value
+        amt_raw = ws_v.cell(row=r, column=3).value
+        notes_raw = ws_v.cell(row=r, column=4).value
+
+        if amt_raw is None or not isinstance(amt_raw, (int, float)):
+            continue
+
+        desc_str = str(desc_raw or "").strip()
+
+        # Skip summary rows, totals, and blank descriptions
+        if any(w in desc_str.lower() for w in ["total", "subtotal", "average", "months so far"]):
+            continue
+        if any(k in desc_str.lower() for k in REIMBURSEMENT_KEYWORDS):
+            continue
+        if not date_raw and desc_str.lower() in ["groceries", "utilities", "data", "discretionary", "vacations", "repairs", "auto", "home upgrades"]:
+            continue
+
+        date_str = excel_serial_to_date(date_raw)
+        if not date_str:
+            # Default to the 1st of the sheet's month if date cell is blank
+            date_str = f"{year_str}-{month_str}-01"
+
+        amt = float(amt_raw)
+        should_negate = block_negate_map.get(r, False)
+        if should_negate:
+            amt = -abs(amt)
+
+        # Rule 3: Category resolution
+        if (sheet_name, r) in cell_overrides:
+            category = cell_overrides[(sheet_name, r)]
+        elif r in row_category_map:
+            category = row_category_map[r]
+        else:
+            category = "Off-Budget / Uncategorized"
+
+        # Combine notes strictly from column 4
+        notes_str = ""
+        if notes_raw and isinstance(notes_raw, str) and notes_raw.strip() != category:
+            notes_str = notes_raw.strip()
+
+        records.append({
+            "date": date_str,
+            "year_month": year_month,
+            "year": int(year_str),
+            "month": int(month_str),
+            "description": desc_str,
+            "amount": round(amt, 2),
+            "category": category,
+            "sheet_source": sheet_name,
+            "row_number": r,
+            "notes": notes_str
+        })
+
+    return records
+
+def migrate(excel_path: str = None, data_dir: str = None):
+    target_excel = excel_path or EXCEL_PATH
+    target_data_dir = data_dir or DATA_DIR
+    db_path = os.path.join(target_data_dir, "spending.duckdb")
+    backup_csv_path = os.path.join(target_data_dir, "spending_ledger.csv")
+
+    os.makedirs(target_data_dir, exist_ok=True)
+    print(f"Loading workbook from {target_excel}...")
+    wb_formula = openpyxl.load_workbook(target_excel, data_only=False)
+    wb_val = openpyxl.load_workbook(target_excel, data_only=True)
+
+    # Rule 1 & 3: Extract rollup associations
+    cell_overrides = extract_rollup_associations(wb_formula)
+    print(f"Extracted {len(cell_overrides)} authoritative cell overrides from rollup sheets.")
+
+    # Rule 1: Monthly sheets only
+    monthly_sheet_names = sorted([s for s in wb_formula.sheetnames if is_monthly_sheet(s)])
     print(f"Found {len(monthly_sheet_names)} monthly sheets: {monthly_sheet_names[0]} to {monthly_sheet_names[-1]}")
 
     all_records = []
-    
     for s_name in monthly_sheet_names:
-        year_str = s_name[:4]
-        month_str = s_name[4:]
-        year_month = f"{year_str}-{month_str}"
-        
         ws_f = wb_formula[s_name]
         ws_v = wb_val[s_name]
-
-        # 1. Map rows to categories using formula ranges and block boundaries
-        row_category_map = {}
-        block_negate_map = {} # tracks if formula had MULTIPLY(-1, ...)
-        
-        # Scan for total rows
-        total_rows = []
-        for r in range(1, ws_f.max_row + 1):
-            col3_val = ws_f.cell(row=r, column=3).value
-            col3_str = str(col3_val or "")
-            col2_val = str(ws_f.cell(row=r, column=2).value or "").lower()
-            col1_val = str(ws_f.cell(row=r, column=1).value or "").lower()
-            
-            is_total_row = "total" in col2_val or "subtotal" in col2_val or "total" in col1_val
-            has_cell_ref = bool(re.search(r'[A-Za-z]+[0-9]+', col3_str))
-            has_sum_formula = col3_str.startswith("=") and "sum" in col3_str.lower() and has_cell_ref
-            
-            if is_total_row or has_sum_formula:
-                # Determine label
-                label = ""
-                for col in (2, 4, 1, 5):
-                    v = ws_f.cell(row=r, column=col).value
-                    if v and isinstance(v, str) and not str(v).startswith("="):
-                        label = v.strip()
-                        break
-                
-                # Extract formula
-                formula_str = col3_str if col3_str.startswith("=") else ""
-                if not formula_str:
-                    for col in range(1, 10):
-                        f_val = str(ws_f.cell(row=r, column=col).value or "")
-                        if f_val.startswith("="):
-                            formula_str = f_val
-                            break
-                
-                cat_canonical = normalize_category_name(label)
-                needs_negate = "multiply(-1" in formula_str.lower().replace(" ", "")
-
-                # If formula explicitly gives cell ranges like C3:C21
-                ranges = re.findall(r'C([0-9]+):C([0-9]+)', formula_str, re.IGNORECASE)
-                formula_no_ranges = re.sub(r'C[0-9]+:C[0-9]+', '', formula_str, flags=re.IGNORECASE)
-                singles = re.findall(r'C([0-9]+)', formula_no_ranges, re.IGNORECASE)
-                
-                if ranges or singles:
-                    for s_r, e_r in ranges:
-                        for tr in range(int(s_r), int(e_r) + 1):
-                            row_category_map[tr] = cat_canonical
-                            block_negate_map[tr] = needs_negate
-                    for sr in singles:
-                        row_category_map[int(sr)] = cat_canonical
-                        block_negate_map[int(sr)] = needs_negate
-                
-                total_rows.append((r, cat_canonical, needs_negate))
-
-        # Secondary pass: sequential block fallback for rows not explicitly inside a SUM range
-        # E.g. where total row sits right below a section
-        prev_r = 1
-        for t_row, cat_canonical, needs_negate in total_rows:
-            for r in range(prev_r + 1, t_row):
-                if r not in row_category_map:
-                    row_category_map[r] = cat_canonical
-                    block_negate_map[r] = needs_negate
-            prev_r = t_row
-
-        total_row_indices = {t[0] for t in total_rows}
-
-        # 2. Extract transaction rows
-        for r in range(2, ws_v.max_row + 1):
-            if r in total_row_indices:
-                continue
-
-            # Check if this row in the formula sheet contains a subtotal/rollup formula (has cell references)
-            cell_f_amt = ws_f.cell(row=r, column=3).value
-            if cell_f_amt and str(cell_f_amt).startswith("=") and re.search(r'[A-Za-z]+[0-9]+', str(cell_f_amt)):
-                continue
-
-            date_raw = ws_v.cell(row=r, column=1).value
-            desc_raw = ws_v.cell(row=r, column=2).value
-            amt_raw = ws_v.cell(row=r, column=3).value
-            notes_raw = ws_v.cell(row=r, column=4).value
-            
-            # Also check side columns for split / due jing notes
-            side_note = ""
-            for c in range(5, 10):
-                sv = ws_v.cell(row=r, column=c).value
-                if sv and isinstance(sv, str):
-                    side_note += f" {sv.strip()}"
-            side_note = side_note.strip()
-
-            if amt_raw is None or not isinstance(amt_raw, (int, float)):
-                continue
-
-            desc_str = str(desc_raw or "").strip()
-            
-            # Skip summary rows, totals, and blank descriptions
-            if any(w in desc_str.lower() for w in ["total", "subtotal", "average", "months so far"]):
-                continue
-            if not date_raw and desc_str.lower() in ["groceries", "utilities", "data", "discretionary", "vacations", "repairs", "auto", "home upgrades"]:
-                continue
-            if desc_str.lower().startswith("due ") and not date_raw:
-                continue
-
-            date_str = excel_serial_to_date(date_raw)
-            if not date_str:
-                # Default to the 1st of the sheet's month if date cell is blank
-                date_str = f"{year_str}-{month_str}-01"
-
-            # Normalize amount: expenses should be negative, refunds positive
-            amt = float(amt_raw)
-            should_negate = block_negate_map.get(r, False)
-            if should_negate:
-                # In sheets where expenses were positive and multiplied by -1
-                amt = -abs(amt)
-            else:
-                # If sheet had positive expenses without explicit multiply, check if majority are negative
-                pass
-
-            # Category resolution:
-            # 1. Authoritative cell override from yearly rollup
-            if (s_name, r) in cell_overrides:
-                category = cell_overrides[(s_name, r)]
-            else:
-                # Trust the sheet: only rows in the categorized blocks belong to those categories
-                category = row_category_map.get(r)
-                if not category:
-                    d_lower = desc_str.lower()
-                    if any(k in d_lower for k in ["attic upgrade", "shed replacement", "fireplace reno", "103r basement", "side door mudroom", "landscaping", "electric upgrade"]):
-                        category = "Home Upgrades"
-                    elif any(k in d_lower for k in ["9049", "plumbing", "furnace repair", "rav4 prime", "julian plumber", "tasker on taskrabbit", "first class plumbing"]):
-                        category = "Repairs"
-                    elif any(k in d_lower for k in ["zelle payment to rena goldin", "deposit *mobile"]):
-                        category = "Shared / Reimbursements"
-                    else:
-                        category = "Off-Budget / Uncategorized"
-
-            if not category or category == "":
-                category = "Discretionary"
-
-            # Combine notes
-            full_notes = ""
-            if notes_raw and isinstance(notes_raw, str) and notes_raw.strip() != category:
-                full_notes = notes_raw.strip()
-            if side_note:
-                full_notes = f"{full_notes} | {side_note}".strip(" |")
-
-            all_records.append({
-                "date": date_str,
-                "year_month": year_month,
-                "year": int(year_str),
-                "month": int(month_str),
-                "description": desc_str,
-                "amount": round(amt, 2),
-                "category": category,
-                "sheet_source": s_name,
-                "row_number": r,
-                "notes": full_notes
-            })
+        sheet_records = parse_monthly_sheet(ws_f, ws_v, s_name, cell_overrides)
+        all_records.extend(sheet_records)
 
     df = pd.DataFrame(all_records)
     print(f"Total transactions extracted: {len(df)}")
@@ -305,15 +339,16 @@ def migrate():
     print(cat_summary.to_string(index=False))
 
     # Save to CSV backup
-    df.to_csv(BACKUP_CSV_PATH, index=False)
-    print(f"Saved CSV backup to: {BACKUP_CSV_PATH}")
+    df.to_csv(backup_csv_path, index=False)
+    print(f"Saved CSV backup to: {backup_csv_path}")
 
     # Save to DuckDB
-    con = duckdb.connect(DB_PATH)
+    con = duckdb.connect(db_path)
     con.execute("CREATE OR REPLACE TABLE transactions AS SELECT * FROM df")
     count = con.execute("SELECT count(*) FROM transactions").fetchone()[0]
-    print(f"DuckDB table 'transactions' created with {count} rows in: {DB_PATH}")
+    print(f"DuckDB table 'transactions' created with {count} rows in: {db_path}")
     con.close()
+    return df
 
 if __name__ == "__main__":
     migrate()
